@@ -1,0 +1,253 @@
+---
+- name: Install required OS packages
+  ansible.builtin.apt:
+    name:
+      - socat
+      - conntrack
+      - ipset
+      - iptables
+      - apt-transport-https
+      - ca-certificates
+      - curl
+    state: present
+    update_cache: true
+
+- name: Disable swap immediately
+  ansible.builtin.command: swapoff -a
+  changed_when: false
+
+- name: Disable swap permanently in /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+    replace: '# \1'
+
+- name: Load required kernel modules at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    mode: '0644'
+    content: |
+      overlay
+      br_netfilter
+
+- name: Modprobe required kernel modules
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Configure sysctl parameters for Kubernetes networking
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-kubernetes.conf
+    mode: '0644'
+    content: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+  notify: Reload sysctl
+
+- name: Apply sysctl immediately
+  ansible.builtin.command: sysctl --system
+  changed_when: false
+
+- name: Create required directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /etc/cni/net.d
+    - /opt/cni/bin
+    - /var/lib/kubelet
+    - /var/lib/kube-proxy
+    - /var/lib/kubernetes
+    - /var/run/kubernetes
+    - /etc/containerd
+
+- name: Download and unpack CNI plugins
+  ansible.builtin.unarchive:
+    src: "https://github.com/containernetworking/plugins/releases/download/{{ cni_plugins_version }}/cni-plugins-linux-amd64-{{ cni_plugins_version }}.tgz"
+    dest: /opt/cni/bin
+    remote_src: true
+    creates: /opt/cni/bin/bridge
+
+- name: Download runc binary
+  ansible.builtin.get_url:
+    url: "https://github.com/opencontainers/runc/releases/download/{{ runc_version }}/runc.amd64"
+    dest: /usr/local/bin/runc
+    mode: '0755'
+
+- name: Download and unpack containerd
+  ansible.builtin.unarchive:
+    src: "https://github.com/containerd/containerd/releases/download/v{{ containerd_version }}/containerd-{{ containerd_version }}-linux-amd64.tar.gz"
+    dest: /usr/local
+    remote_src: true
+    creates: /usr/local/bin/containerd
+
+- name: Configure containerd with systemd cgroup
+  ansible.builtin.shell: |
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+  args:
+    creates: /etc/containerd/config.toml
+
+- name: Create containerd systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/containerd.service
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=containerd container runtime
+      Documentation=https://containerd.io
+      After=network.target local-fs.target
+
+      [Service]
+      ExecStartPre=-/sbin/modprobe overlay
+      ExecStart=/usr/local/bin/containerd
+      Type=notify
+      Delegate=yes
+      KillMode=process
+      Restart=always
+      RestartSec=5
+      LimitNPROC=infinity
+      LimitCORE=infinity
+      LimitNOFILE=1048576
+      TasksMax=infinity
+      OOMScoreAdjust=-999
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Download Kubernetes worker binaries (kubelet, kube-proxy, kubectl)
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/{{ k8s_version }}/bin/linux/amd64/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    mode: '0755'
+  loop:
+    - kubelet
+    - kube-proxy
+    - kubectl
+
+- name: Copy CA certificate to worker
+  ansible.builtin.copy:
+    src: "{{ certs_dir }}/ca.pem"
+    dest: /var/lib/kubernetes/ca.pem
+    mode: '0600'
+
+- name: Copy Node TLS certificates
+  ansible.builtin.copy:
+    src: "{{ certs_dir }}/{{ item }}"
+    dest: "/var/lib/kubelet/{{ item }}"
+    mode: '0600'
+  loop:
+    - "{{ inventory_hostname }}.pem"
+    - "{{ inventory_hostname }}-key.pem"
+
+- name: Copy Node kubeconfig
+  ansible.builtin.copy:
+    src: "{{ configs_dir }}/{{ inventory_hostname }}.kubeconfig"
+    dest: /var/lib/kubelet/kubeconfig
+    mode: '0600'
+
+- name: Copy kube-proxy kubeconfig
+  ansible.builtin.copy:
+    src: "{{ configs_dir }}/kube-proxy.kubeconfig"
+    dest: /var/lib/kube-proxy/kubeconfig
+    mode: '0600'
+
+- name: Create kubelet configuration file
+  ansible.builtin.copy:
+    dest: /var/lib/kubelet/kubelet-config.yaml
+    mode: '0644'
+    content: |
+      kind: KubeletConfiguration
+      apiVersion: kubelet.config.k8s.io/v1beta1
+      authentication:
+        anonymous:
+          enabled: false
+        webhook:
+          enabled: true
+        x509:
+          clientCAFile: "/var/lib/kubernetes/ca.pem"
+      authorization:
+        mode: Webhook
+      clusterDomain: "cluster.local"
+      clusterDNS:
+        - "{{ cluster_dns_ip }}"
+      podCIDR: "{{ pod_cidr }}"
+      resolvConf: "/run/systemd/resolve/resolv.conf"
+      runtimeRequestTimeout: "15m"
+      tlsCertFile: "/var/lib/kubelet/{{ inventory_hostname }}.pem"
+      tlsPrivateKeyFile: "/var/lib/kubelet/{{ inventory_hostname }}-key.pem"
+      cgroupDriver: systemd
+
+- name: Create kubelet systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/kubelet.service
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Kubernetes Kubelet
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=containerd.service
+      Requires=containerd.service
+
+      [Service]
+      ExecStart=/usr/local/bin/kubelet \
+        --config=/var/lib/kubelet/kubelet-config.yaml \
+        --container-runtime-endpoint=unix:///run/containerd/containerd.sock \
+        --kubeconfig=/var/lib/kubelet/kubeconfig \
+        --register-node=true \
+        --v=2
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Create kube-proxy configuration file
+  ansible.builtin.copy:
+    dest: /var/lib/kube-proxy/kube-proxy-config.yaml
+    mode: '0644'
+    content: |
+      kind: KubeProxyConfiguration
+      apiVersion: kubeproxy.config.k8s.io/v1alpha1
+      clientConnection:
+        kubeconfig: "/var/lib/kube-proxy/kubeconfig"
+      mode: "iptables"
+      clusterCIDR: "10.200.0.0/16"
+
+- name: Create kube-proxy systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/kube-proxy.service
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Kubernetes Kube Proxy
+      Documentation=https://github.com/kubernetes/kubernetes
+      After=network.target
+
+      [Service]
+      ExecStart=/usr/local/bin/kube-proxy \
+        --config=/var/lib/kube-proxy/kube-proxy-config.yaml
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Start and enable containerd, kubelet, and kube-proxy
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - containerd
+    - kubelet
+    - kube-proxy

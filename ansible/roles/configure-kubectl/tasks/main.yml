@@ -1,0 +1,40 @@
+---
+- name: Configure kubectl cluster endpoint
+  ansible.builtin.command: >
+    kubectl config set-cluster k8s-hardway
+    --certificate-authority={{ certs_dir }}/ca.pem
+    --embed-certs=true
+    --server=https://{{ kubernetes_public_address }}:6443
+  changed_when: false
+
+- name: Configure kubectl admin user credentials
+  ansible.builtin.command: >
+    kubectl config set-credentials admin
+    --client-certificate={{ certs_dir }}/admin.pem
+    --client-key={{ certs_dir }}/admin-key.pem
+    --embed-certs=true
+  changed_when: false
+
+- name: Configure kubectl context
+  ansible.builtin.command: >
+    kubectl config set-context k8s-hardway
+    --cluster=k8s-hardway
+    --user=admin
+  changed_when: false
+
+- name: Use context k8s-hardway
+  ansible.builtin.command: >
+    kubectl config use-context k8s-hardway
+  changed_when: false
+
+- name: Verify cluster node registration from remote client
+  ansible.builtin.command: kubectl get nodes
+  register: remote_nodes
+  retries: 6
+  delay: 5
+  until: remote_nodes.rc == 0
+  changed_when: false
+
+- name: Display cluster nodes
+  ansible.builtin.debug:
+    var: remote_nodes.stdout_lines

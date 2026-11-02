@@ -1,0 +1,155 @@
+---
+- name: Ensure configs directory exists
+  ansible.builtin.file:
+    path: "{{ configs_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Generate Worker Kubeconfig files
+  ansible.builtin.shell: |
+    NODE="{{ item }}"
+    KUBECONFIG_FILE="{{ configs_dir }}/${NODE}.kubeconfig"
+
+    kubectl config set-cluster kubernetes-the-hard-way \
+      --certificate-authority={{ certs_dir }}/ca.pem \
+      --embed-certs=true \
+      --server=https://{{ kubernetes_public_address }}:6443 \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-credentials system:node:${NODE} \
+      --client-certificate={{ certs_dir }}/${NODE}.pem \
+      --client-key={{ certs_dir }}/${NODE}-key.pem \
+      --embed-certs=true \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-context default \
+      --cluster=kubernetes-the-hard-way \
+      --user=system:node:${NODE} \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config use-context default --kubeconfig=${KUBECONFIG_FILE}
+  loop: "{{ groups['workers'] }}"
+  args:
+    creates: "{{ configs_dir }}/{{ item }}.kubeconfig"
+
+- name: Generate kube-proxy Kubeconfig file
+  ansible.builtin.shell: |
+    KUBECONFIG_FILE="{{ configs_dir }}/kube-proxy.kubeconfig"
+
+    kubectl config set-cluster kubernetes-the-hard-way \
+      --certificate-authority={{ certs_dir }}/ca.pem \
+      --embed-certs=true \
+      --server=https://{{ kubernetes_public_address }}:6443 \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-credentials system:kube-proxy \
+      --client-certificate={{ certs_dir }}/kube-proxy.pem \
+      --client-key={{ certs_dir }}/kube-proxy-key.pem \
+      --embed-certs=true \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-context default \
+      --cluster=kubernetes-the-hard-way \
+      --user=system:kube-proxy \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config use-context default --kubeconfig=${KUBECONFIG_FILE}
+  args:
+    creates: "{{ configs_dir }}/kube-proxy.kubeconfig"
+
+- name: Generate kube-controller-manager Kubeconfig file
+  ansible.builtin.shell: |
+    KUBECONFIG_FILE="{{ configs_dir }}/kube-controller-manager.kubeconfig"
+
+    kubectl config set-cluster kubernetes-the-hard-way \
+      --certificate-authority={{ certs_dir }}/ca.pem \
+      --embed-certs=true \
+      --server=https://127.0.0.1:6443 \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-credentials system:kube-controller-manager \
+      --client-certificate={{ certs_dir }}/kube-controller-manager.pem \
+      --client-key={{ certs_dir }}/kube-controller-manager-key.pem \
+      --embed-certs=true \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-context default \
+      --cluster=kubernetes-the-hard-way \
+      --user=system:kube-controller-manager \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config use-context default --kubeconfig=${KUBECONFIG_FILE}
+  args:
+    creates: "{{ configs_dir }}/kube-controller-manager.kubeconfig"
+
+- name: Generate kube-scheduler Kubeconfig file
+  ansible.builtin.shell: |
+    KUBECONFIG_FILE="{{ configs_dir }}/kube-scheduler.kubeconfig"
+
+    kubectl config set-cluster kubernetes-the-hard-way \
+      --certificate-authority={{ certs_dir }}/ca.pem \
+      --embed-certs=true \
+      --server=https://127.0.0.1:6443 \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-credentials system:kube-scheduler \
+      --client-certificate={{ certs_dir }}/kube-scheduler.pem \
+      --client-key={{ certs_dir }}/kube-scheduler-key.pem \
+      --embed-certs=true \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-context default \
+      --cluster=kubernetes-the-hard-way \
+      --user=system:kube-scheduler \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config use-context default --kubeconfig=${KUBECONFIG_FILE}
+  args:
+    creates: "{{ configs_dir }}/kube-scheduler.kubeconfig"
+
+- name: Generate Admin Kubeconfig file (internal)
+  ansible.builtin.shell: |
+    KUBECONFIG_FILE="{{ configs_dir }}/admin.kubeconfig"
+
+    kubectl config set-cluster kubernetes-the-hard-way \
+      --certificate-authority={{ certs_dir }}/ca.pem \
+      --embed-certs=true \
+      --server=https://127.0.0.1:6443 \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-credentials admin \
+      --client-certificate={{ certs_dir }}/admin.pem \
+      --client-key={{ certs_dir }}/admin-key.pem \
+      --embed-certs=true \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config set-context default \
+      --cluster=kubernetes-the-hard-way \
+      --user=admin \
+      --kubeconfig=${KUBECONFIG_FILE}
+
+    kubectl config use-context default --kubeconfig=${KUBECONFIG_FILE}
+  args:
+    creates: "{{ configs_dir }}/admin.kubeconfig"
+
+- name: Generate Encryption Key
+  ansible.builtin.shell: head -c 32 /dev/urandom | base64
+  register: encryption_key_raw
+  changed_when: false
+
+- name: Generate Data Encryption Configuration File
+  ansible.builtin.copy:
+    dest: "{{ configs_dir }}/encryption-config.yaml"
+    mode: '0600'
+    content: |
+      kind: EncryptionConfiguration
+      apiVersion: apiserver.config.k8s.io/v1
+      resources:
+        - resources:
+            - secrets
+          providers:
+            - aescbc:
+                keys:
+                  - name: key1
+                    secret: {{ encryption_key_raw.stdout }}
+            - identity: {}

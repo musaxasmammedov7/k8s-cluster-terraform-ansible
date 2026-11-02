@@ -1,0 +1,86 @@
+---
+- name: Smoke Test 1 - Verify Data Encryption at Rest in ETCD
+  block:
+    - name: Create test secret in Kubernetes
+      ansible.builtin.shell: |
+        kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig create secret generic smoke-test-secret --from-literal="super_secret=k8s_hard_way_passed" --dry-run=client -o yaml | kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig apply -f -
+      changed_when: false
+
+    - name: Inspect raw etcd data for secret encryption prefix
+      ansible.builtin.shell: |
+        ETCDCTL_API=3 /usr/local/bin/etcdctl get \
+          --endpoints=https://127.0.0.1:2379 \
+          --cacert=/etc/etcd/ca.pem \
+          --cert=/etc/etcd/kubernetes.pem \
+          --key=/etc/etcd/kubernetes-key.pem \
+          /registry/secrets/default/smoke-test-secret
+      register: etcd_raw_secret
+      changed_when: false
+
+    - name: Assert secret is encrypted with aescbc prefix
+      ansible.builtin.assert:
+        that:
+          - "'k8s:enc:aescbc:v1:key1' in etcd_raw_secret.stdout"
+        fail_msg: "Data in etcd is not properly encrypted at rest!"
+        success_msg: "SUCCESS: Secret is verified to be encrypted with aescbc:v1:key1"
+
+- name: Smoke Test 2 - Deploy Nginx Workload
+  block:
+    - name: Create Nginx Deployment
+      ansible.builtin.shell: |
+        kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig create deployment nginx-smoke-test --image=nginx:alpine --replicas=2 --dry-run=client -o yaml | kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig apply -f -
+      changed_when: false
+
+    - name: Wait for Nginx Deployment rollout
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig rollout status deployment/nginx-smoke-test --timeout=120s
+      changed_when: false
+
+- name: Smoke Test 3 - Verify Pod Logs and Exec
+  block:
+    - name: Test Pod Logs via API Server
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig logs -l app=nginx-smoke-test --tail=5
+      register: pod_logs
+      retries: 5
+      delay: 3
+      until: pod_logs.rc == 0
+      changed_when: false
+
+    - name: Test Container Exec via API Server
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig exec deployment/nginx-smoke-test -- nginx -v
+      register: exec_test
+      changed_when: false
+
+    - name: Assert Exec succeeded
+      ansible.builtin.assert:
+        that:
+          - exec_test.rc == 0
+        success_msg: "SUCCESS: Bidirectional kube-apiserver to kubelet exec works"
+
+- name: Smoke Test 4 - Verify Cluster Internal DNS Resolution
+  block:
+    - name: Run DNS resolution test pod
+      ansible.builtin.shell: |
+        kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig run dns-smoke-test --image=busybox:1.36 --restart=Never -- sleep 3600 --dry-run=client -o yaml | kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig apply -f -
+        kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig wait --for=condition=Ready pod/dns-smoke-test --timeout=60s
+        kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig exec pod/dns-smoke-test -- nslookup kubernetes.default
+      register: dns_test
+      retries: 6
+      delay: 5
+      until: dns_test.rc == 0
+      changed_when: false
+
+    - name: Assert DNS resolution succeeded
+      ansible.builtin.assert:
+        that:
+          - "'10.32.0.1' in dns_test.stdout"
+        success_msg: "SUCCESS: CoreDNS successfully resolved kubernetes.default to 10.32.0.1"
+
+- name: Cleanup Smoke Test Resources
+  ansible.builtin.shell: |
+    kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig delete deployment nginx-smoke-test --ignore-not-found
+    kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig delete pod dns-smoke-test --ignore-not-found
+    kubectl --kubeconfig=/var/lib/kubernetes/admin.kubeconfig delete secret smoke-test-secret --ignore-not-found
+  changed_when: false

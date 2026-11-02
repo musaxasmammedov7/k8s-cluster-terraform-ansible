@@ -1,0 +1,18 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+*.tfplan
+
+# Generated PKI & Configs (re-creatable by Ansible)
+ansible/certs/
+ansible/configs/
+*.pem
+*.csr
+*.srl
+*.cnf
+
+# OS & Editor files
+.DS_Store
+*.log

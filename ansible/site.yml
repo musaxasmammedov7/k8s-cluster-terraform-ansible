@@ -1,0 +1,81 @@
+---
+# Master Orchestration Playbook: Bootstrap Kubernetes Cluster The Hard Way
+
+- name: Step 1 - Provision CA and Generate TLS Certificates
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    certs_dir: "{{ playbook_dir }}/certs"
+    kubernetes_public_address: "{{ hostvars[groups['controllers'][0]]['ansible_host'] }}"
+    kubernetes_cluster_ip: "10.32.0.1"
+  roles:
+    - role: generate-certs
+
+- name: Step 2 - Generate Kubernetes Kubeconfig Files and Encryption Configuration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    certs_dir: "{{ playbook_dir }}/certs"
+    configs_dir: "{{ playbook_dir }}/configs"
+    kubernetes_public_address: "{{ hostvars[groups['controllers'][0]]['ansible_host'] }}"
+  roles:
+    - role: generate-configs
+
+- name: Step 3 - Bootstrap the ETCD Cluster
+  hosts: controllers
+  gather_facts: true
+  vars:
+    etcd_version: "v3.5.9"
+    certs_dir: "{{ playbook_dir }}/certs"
+  roles:
+    - role: bootstrap-etcd
+
+- name: Step 4 - Bootstrap the Kubernetes Control Plane
+  hosts: controllers
+  gather_facts: true
+  vars:
+    k8s_version: "v1.28.2"
+    cluster_cidr: "10.200.0.0/16"
+    service_cidr: "10.32.0.0/24"
+    certs_dir: "{{ playbook_dir }}/certs"
+    configs_dir: "{{ playbook_dir }}/configs"
+  roles:
+    - role: setup-control-plane
+
+- name: Step 5 - Bootstrap Kubernetes Worker Nodes
+  hosts: workers
+  gather_facts: true
+  vars:
+    k8s_version: "v1.28.2"
+    containerd_version: "1.7.6"
+    runc_version: "v1.1.9"
+    cni_plugins_version: "v1.3.0"
+    cluster_dns_ip: "10.32.0.10"
+    certs_dir: "{{ playbook_dir }}/certs"
+    configs_dir: "{{ playbook_dir }}/configs"
+  roles:
+    - role: setup-worker-nodes
+
+- name: Step 6 - Configure Remote kubectl Access
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    certs_dir: "{{ playbook_dir }}/certs"
+    kubernetes_public_address: "{{ hostvars[groups['controllers'][0]]['ansible_host'] }}"
+  roles:
+    - role: configure-kubectl
+
+- name: Step 7 - Setup Pod Networking (CNI) and DNS Cluster Add-on
+  hosts: controllers[0]
+  gather_facts: false
+  roles:
+    - role: setup-networking
+
+- name: Step 8 - Run Cluster Smoke Tests
+  hosts: controllers[0]
+  gather_facts: false
+  roles:
+    - role: smoke-test
